@@ -1,0 +1,3 @@
+Enterprise RAG Agent is a knowledge base question answering system.
+It supports document upload, document parsing, text chunking, embedding generation, vector storage, and semantic retrieval.
+The system is built with FastAPI, Chroma, and a pluggable embedding interface.

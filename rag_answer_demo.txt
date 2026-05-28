@@ -1,0 +1,2 @@
+Enterprise RAG Agent is a knowledge base question answering system.
+It supports document upload, PDF and Word parsing, Markdown and TXT parsing, text chunking, embedding generation, Chroma vector storage, semantic retrieval, and LLM based answer generation.

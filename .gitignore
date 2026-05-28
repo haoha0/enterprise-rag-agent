@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Local storage
+storage/uploads/*
+storage/chroma/*
+
+# Keep directories
+!storage/uploads/.gitkeep
+!storage/chroma/.gitkeep
