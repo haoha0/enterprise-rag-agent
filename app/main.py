@@ -2,10 +2,13 @@ from fastapi import FastAPI
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
+from app.db.init_db import init_db
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
+
+    init_db()
 
     app = FastAPI(
         title=settings.app_name,

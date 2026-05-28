@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import UploadFile
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.schemas.document import DocumentUploadResponse
@@ -10,10 +11,11 @@ from app.services.document_parser import DocumentParser
 from app.services.text_splitter import TextSplitter
 from app.services.vector_store import VectorStoreService
 from app.services.embeddings.factory import get_embedding_client
-
+from app.repositories.document_repository import DocumentRepository
+from app.repositories.chunk_repository import ChunkRepository
 
 class DocumentService:
-    def __init__(self) -> None:
+    def __init__(self, db: Session) -> None:
         self.settings = get_settings()
         self.upload_dir = Path(self.settings.upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -25,6 +27,8 @@ class DocumentService:
         )
         self.embedding_client = get_embedding_client()
         self.vector_store = VectorStoreService()
+        self.document_repository = DocumentRepository(db)
+        self.chunk_repository = ChunkRepository(db)
 
     def validate_file_extension(self, filename: str) -> str:
         file_extension = Path(filename).suffix.lower()
@@ -82,6 +86,23 @@ class DocumentService:
             chunks=chunks,
             embeddings=embeddings,
         )
+
+        # create document record in database
+        self.document_repository.create_document(
+            document_id=document_id,
+            original_filename=file.filename,
+            saved_filename=saved_filename,
+            file_path=str(file_path),
+            file_extension=file_extension,
+            content_type=file.content_type,
+            file_size=file_size,
+            text_length=len(parsed_text),
+            chunk_count=len(chunks),
+            vector_count=vector_count,
+            status="indexed",
+        )
+
+        self.chunk_repository.create_chunks(chunks)
 
         return DocumentUploadResponse(
             document_id=document_id,

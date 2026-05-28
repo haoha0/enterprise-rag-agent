@@ -1,3 +1,6 @@
+from sqlalchemy.orm import Session
+
+from app.repositories.qa_record_repository import QARecordRepository
 from app.schemas.qa import (
     AnswerRequest,
     AnswerResponse,
@@ -13,11 +16,12 @@ from app.services.prompt_builder import PromptBuilder
 
 
 class QAService:
-    def __init__(self) -> None:
+    def __init__(self, db: Session | None = None) -> None:
         self.embedding_client = get_embedding_client()
         self.vector_store = VectorStoreService()
         self.llm_client = get_llm_client()
         self.prompt_builder = PromptBuilder()
+        self.qa_record_repository = QARecordRepository(db) if db else None
 
     def retrieve(self, request: RetrieveRequest) -> RetrieveResponse:
         query_embedding = self.embedding_client.embed_texts([request.query])[0]
@@ -47,6 +51,16 @@ class QAService:
         )
 
         answer = self.llm_client.generate(prompt)
+
+        if self.qa_record_repository:
+            self.qa_record_repository.create_record(
+                question=request.query,
+                answer=answer,
+                top_k=request.top_k,
+                retrieved_chunk_ids=[
+                    chunk.chunk_id for chunk in retrieve_response.results
+                ],
+            )
 
         return AnswerResponse(
             query=request.query,

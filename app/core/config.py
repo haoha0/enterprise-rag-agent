@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_temperature: float = 0.2
 
+    database_url: str = "postgresql+psycopg://rag_user:rag_password@localhost:5432/rag_db"
+
     allowed_file_extensions: set[str] = {
         ".pdf",
         ".docx",

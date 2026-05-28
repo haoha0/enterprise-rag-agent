@@ -4,6 +4,8 @@
 
 当前项目默认使用 Mock Embedding 和 Mock LLM，便于本地开发、测试和理解系统流程；也预留了 OpenAI-compatible 接口，可以接入 OpenAI、DeepSeek、SiliconFlow 或其他兼容 OpenAI SDK 调用格式的模型服务。
 
+当前阶段新增了 PostgreSQL 结构化数据存储层，用于保存文档元数据、文本 chunk 明细和问答记录。Chroma 继续负责向量检索，PostgreSQL 负责业务数据持久化，两者通过 `document_id` / `chunk_id` 关联。
+
 ## 功能概览
 
 ### 文档入库链路
@@ -15,7 +17,9 @@
 5. 将全文按固定长度和 overlap 切分为 chunks。
 6. 调用 EmbeddingClient 生成文本向量。
 7. 将 chunk 内容、metadata 和 embedding 写入 Chroma 持久化向量库。
-8. 返回上传、解析、切分、入库状态。
+8. 将文档元数据写入 PostgreSQL `documents` 表。
+9. 将文本切分结果写入 PostgreSQL `chunks` 表。
+10. 返回上传、解析、切分、入库状态。
 
 ### 问答链路
 
@@ -25,7 +29,10 @@
 4. 返回相关 chunks 和来源 metadata。
 5. 根据检索结果构造 RAG Prompt。
 6. 调用 LLM 生成答案。
-7. 返回 answer 和 sources。
+7. 将完整问答记录写入 PostgreSQL `qa_records` 表。
+8. 返回 answer 和 sources。
+
+说明：`/qa/retrieve` 只做检索，不保存问答记录；`/qa/answer` 执行完整 RAG 问答并保存记录。
 
 ## 技术栈
 
@@ -36,6 +43,10 @@
 - PDF 解析：PyMuPDF
 - Word 解析：python-docx
 - 向量数据库：ChromaDB PersistentClient
+- 关系型数据库：PostgreSQL
+- ORM：SQLAlchemy 2.x
+- PostgreSQL Driver：psycopg 3
+- 数据库迁移工具：Alembic（依赖已加入，迁移脚本可后续补齐）
 - LLM / Embedding SDK：openai Python SDK 的 OpenAI-compatible 调用方式
 - 测试：pytest + FastAPI TestClient
 
@@ -52,7 +63,18 @@
 │   │       └── router.py           # v1 路由聚合
 │   ├── core
 │   │   └── config.py               # 应用配置和环境变量
-│   ├── db                         # 数据库扩展预留目录
+│   ├── db
+│   │   ├── base.py                 # SQLAlchemy DeclarativeBase
+│   │   ├── init_db.py              # 应用启动时创建数据库表
+│   │   └── session.py              # Engine、SessionLocal、get_db 依赖
+│   ├── models
+│   │   ├── chunk.py                # chunks 表 ORM 模型
+│   │   ├── document.py             # documents 表 ORM 模型
+│   │   └── qa_record.py            # qa_records 表 ORM 模型
+│   ├── repositories
+│   │   ├── chunk_repository.py     # chunk 持久化
+│   │   ├── document_repository.py  # document 持久化
+│   │   └── qa_record_repository.py # 问答记录持久化
 │   ├── schemas
 │   │   ├── chunk.py                # 文本块模型
 │   │   ├── document.py             # 上传响应模型
@@ -86,9 +108,9 @@
 当前接口：
 
 - `GET /api/v1/health`：健康检查。
-- `POST /api/v1/documents/upload`：上传文档，并同步完成解析、切分、向量化和入库。
+- `POST /api/v1/documents/upload`：上传文档，并同步完成解析、切分、向量化、Chroma 入库和 PostgreSQL 元数据入库。
 - `POST /api/v1/qa/retrieve`：只执行检索，返回 Top-K chunks。
-- `POST /api/v1/qa/answer`：执行完整 RAG 问答，返回答案和引用来源。
+- `POST /api/v1/qa/answer`：执行完整 RAG 问答，保存问答记录，并返回答案和引用来源。
 
 ### 文档解析
 
@@ -115,6 +137,28 @@
 - `metadata`
 
 metadata 中包含原始文件名、服务端保存文件名、文件路径、扩展名、起止字符位置等信息。
+
+### PostgreSQL 数据库层
+
+当前项目通过 SQLAlchemy 2.x 接入 PostgreSQL，并按职责拆分为三层：
+
+- `app/db`：数据库基础设施，包括 SQLAlchemy `Base`、数据库连接引擎、会话工厂和 FastAPI `get_db` 依赖。
+- `app/models`：ORM 表模型，描述 Python 对象与数据库表之间的映射。
+- `app/repositories`：封装数据库写入逻辑，避免在 service 层直接散落 SQLAlchemy 操作。
+
+应用启动时会调用 `init_db()`，通过 `Base.metadata.create_all(bind=engine)` 创建当前 ORM 模型对应的表。因此本地启动 API 前，需要确保 `DATABASE_URL` 指向的 PostgreSQL 服务已经可连接。
+
+当前表设计：
+
+- `documents`：保存文档级元数据，包括 `document_id`、原始文件名、服务端保存文件名、文件路径、扩展名、文件大小、解析后文本长度、chunk 数、向量数、状态、创建时间和更新时间。
+- `chunks`：保存 chunk 级明细，包括 `chunk_id`、`document_id`、`chunk_index`、正文内容、正文长度、起止字符位置和创建时间。`document_id` 外键关联 `documents.document_id`。
+- `qa_records`：保存问答记录，包括问题、答案、`top_k`、检索到的 chunk id 列表和创建时间。其中 `retrieved_chunk_ids` 使用 PostgreSQL `JSONB` 存储。
+
+当前 PostgreSQL 与 Chroma 的职责边界：
+
+- PostgreSQL 保存业务可查询、可审计的结构化数据。
+- Chroma 保存向量、chunk 文本和 metadata，用于相似度检索。
+- 两者通过 `document_id` 和 `chunk_id` 对齐，后续可以支持文档管理、问答历史、权限控制和审计功能。
 
 ### Embedding
 
@@ -144,6 +188,8 @@ embed_texts(texts: list[str]) -> list[list[float]]
 - metadatas：chunk metadata
 
 检索时返回 `RetrievedChunk`，包含 `chunk_id`、`content`、`score` 和 `metadata`。Chroma 默认返回 distance，项目中将其转换为 `1 / (1 + distance)` 形式的相似度分数。
+
+注意：Chroma 当前仍是检索主路径，PostgreSQL 中的 `chunks` 表用于保存结构化副本和后续业务查询，不替代向量检索。
 
 ### RAG Prompt
 
@@ -206,6 +252,8 @@ LLM_BASE_URL=
 LLM_API_KEY=
 LLM_MODEL=deepseek-chat
 LLM_TEMPERATURE=0.2
+
+DATABASE_URL=postgresql+psycopg://rag_user:rag_password@localhost:5432/rag_db
 ```
 
 本地开发默认使用：
@@ -232,7 +280,26 @@ LLM_TEMPERATURE=0.2
 
 注意：真实 Embedding 模型的向量维度需要与 Chroma collection 中已有数据保持一致。如果切换 Embedding 模型或维度，建议清空 `storage/chroma/` 后重新入库。
 
+### PostgreSQL 配置
+
+`DATABASE_URL` 使用 SQLAlchemy URL 格式：
+
+```env
+DATABASE_URL=postgresql+psycopg://rag_user:rag_password@localhost:5432/rag_db
+```
+
+如果本地还没有数据库，可以用 `psql` 创建一个开发用户和开发库：
+
+```bash
+psql postgres -c "CREATE USER rag_user WITH PASSWORD 'rag_password';"
+psql postgres -c "CREATE DATABASE rag_db OWNER rag_user;"
+```
+
+如果用户已存在，只需要确认数据库和权限即可。生产环境不要使用示例密码。
+
 ## 启动服务
+
+启动服务前，确保 PostgreSQL 已启动并且 `.env` 中的 `DATABASE_URL` 可连接。应用启动时会自动创建当前 ORM 模型对应的数据表。
 
 ```bash
 uvicorn app.main:app --reload
@@ -282,6 +349,13 @@ curl -X POST "http://127.0.0.1:8000/api/v1/documents/upload" \
 }
 ```
 
+上传成功后，系统会同时完成：
+
+- 保存原始文件到 `storage/uploads/`。
+- 写入向量数据到 Chroma。
+- 写入文档元数据到 PostgreSQL `documents` 表。
+- 写入 chunk 明细到 PostgreSQL `chunks` 表。
+
 ### 检索 Top-K chunks
 
 ```bash
@@ -309,7 +383,11 @@ curl -X POST "http://127.0.0.1:8000/api/v1/qa/answer" \
 - `answer`：LLM 生成的答案。
 - `sources`：用于生成答案的检索片段和来源 metadata。
 
+调用成功后，系统会将问题、答案、`top_k` 和本次检索到的 chunk id 列表写入 PostgreSQL `qa_records` 表。
+
 ## 运行测试
+
+当前应用启动会初始化 PostgreSQL 表，因此运行完整接口测试前需要确保 `DATABASE_URL` 指向的数据库可连接。
 
 ```bash
 pytest
@@ -331,6 +409,7 @@ CHROMA_DIR=$(mktemp -d) EMBEDDING_PROVIDER=mock EMBEDDING_DIMENSION=384 LLM_PROV
 - Prompt 构造。
 - Mock LLM 生成。
 - 检索接口和问答接口。
+- PostgreSQL 文档、chunk 和问答记录写入链路。
 
 如果本地 Chroma 中已有不同维度的 collection 或同名测试 chunk id，测试可能受到历史数据影响。需要彻底清空本地向量库时，可以执行：
 
@@ -342,8 +421,8 @@ pytest
 
 ## 后续可扩展方向
 
-- 接入 PostgreSQL，保存文档元数据、用户、问答记录和权限信息。
-- 增加 Dockerfile 和 docker-compose，统一启动 API、数据库和向量库依赖。
+- 增加 Dockerfile 和 docker-compose，统一启动 API、PostgreSQL 和本地存储依赖。
+- 补齐 Alembic migration 工作流，用迁移脚本替代直接 `create_all` 管理表结构。
 - 增加异步任务队列，将大文件解析、Embedding 和入库从接口同步流程中拆出。
 - 增加文档删除、重新入库、向量库 collection 管理能力。
 - 增加用户认证、企业知识库权限隔离和审计日志。
